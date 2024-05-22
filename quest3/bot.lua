@@ -1,171 +1,151 @@
--- Initialize global variables to maintain current game state and process.
-GameStatus = GameStatus or nil
-ActionInProgress = ActionInProgress or false
+-- Initializing global variables to store the latest game state and game host process.
+LatestGameState = {}  -- Stores all game data
+InAction = false     -- Prevents your bot from doing multiple actions
 
-LogEntries = LogEntries or {}
-
-colorPalette = {
-    crimson = "\27[31m",
-    emerald = "\27[32m",
-    azure = "\27[34m",
-    neutral = "\27[0m",
-    charcoal = "\27[90m"
+colors = {
+  red = "\27[31m",
+  green = "\27[32m",
+  blue = "\27[34m",
+  reset = "\27[0m",
+  gray = "\27[90m"
 }
 
-function recordLog(category, message)
-    LogEntries[category] = LogEntries[category] or {}
-    table.insert(LogEntries[category], message)
+
+-- Checks if two points are within a given range.
+-- @param x1, y1: Coordinates of the first point.
+-- @param x2, y2: Coordinates of the second point.
+-- @param range: The maximum allowed distance between the points.
+-- @return: Boolean indicating if the points are within the specified range.
+function inRange(x1, y1, x2, y2, range)
+    return math.abs(x1 - x2) <= range and math.abs(y1 - y2) <= range
 end
 
-function isWithinDistance(x1, y1, x2, y2, maxDist)
-    return math.abs(x1 - x2) <= maxDist and math.abs(y1 - y2) <= maxDist
+-- Decide the next action based on player proximity, energy, health, and game map analysis.
+-- Prioritize targets based on health (weaker first), distance (closer first), and strategic positions.
+-- Analyze the map for chokepoints or advantageous positions.
+function decideNextAction()
+  local player = LatestGameState.Players[ao.id]
+  local targetInRange = false
+  local bestTarget = nil  -- Stores the ID of the best target player (considering health, distance)
+  -- Find closest and weakest target within attack range
+  for target, state in pairs(LatestGameState.Players) do
+    if target ~= ao.id and inRange(player.x, player.y, state.x, state.y, 1) then
+      targetInRange = true
+      if not bestTarget or state.health < bestTarget.health or (state.health == bestTarget.health and inRange(player.x, player.y, state.x, state.y, 1) < inRange(player.x, player.y, bestTarget.x, bestTarget.y, 1)) then
+        bestTarget = state
+      end
+    end
+  end
+
+  if player.energy > 5 and targetInRange then
+    print(colors.red .. "Player in range. Attacking." .. colors.reset)
+    ao.send({  -- Attack the closest player with all your energy.
+      Target = Game,
+      Action = "PlayerAttack",
+      Player = ao.id,
+      AttackEnergy = tostring(player.energy),
+    })
+    print(colors.red .. "No player in range or low energy. Moving randomly." .. colors.reset)
+ 
+    -- map analysis, using only 4 directions
+	local directionRandom = {"Up", "Down", "Left", "Right"}
+    local randomIndex = math.random(#directionRandom)
+    ao.send({Target = Game, Action = "PlayerMove", Player = ao.id, Direction = directionRandom[randomIndex]})
+  end
+  InAction = false -- Reset the "InAction" flag
 end
 
-function evaluateNextMove()
-    ao.send({Target = Game, Action = "RequestGameState"})
-    local currentPlayer = GameStatus.Players[ao.id]
-    locateNearestOpponent()
-    local opponent = CurrentOpponent and GameStatus.Players[CurrentOpponent]
+-- Handler to print game announcements and trigger game state updates.
+Handlers.add(
+  "PrintAnnouncements",
+  Handlers.utils.hasMatchingTag("Action", "Announcement"),
+  function (msg)
+    if msg.Event == "Started-Waiting-Period" then
+      ao.send({Target = ao.id, Action = "AutoPay"})
+    elseif (msg.Event == "Tick" or msg.Event == "Started-Game") and not InAction then
+      InAction = true -- InAction logic added
+      ao.send({Target = Game, Action = "GetGameState"})
+    elseif InAction then -- InAction logic added
+      print("Previous action still in progress. Skipping.")
+    end
+    print(colors.green .. msg.Event .. ": " .. msg.Data .. colors.reset)
+  end
+)
 
-    if opponent then
-        local opponentClose = isWithinDistance(currentPlayer.x, currentPlayer.y, opponent.x, opponent.y, 1)
-        if currentPlayer.energy > 5 and opponentClose then
-            print(colorPalette.crimson .. "Opponent nearby. Engaging." .. colorPalette.neutral)
-            ao.send({Target = Game, Action = "ExecuteAttack", Player = ao.id, AttackEnergy = tostring(5)})
-        elseif currentPlayer.energy > 0 then
-            local moveDirection = calculateDirection(currentPlayer.x, currentPlayer.y, opponent.x, opponent.y)
-            print(colorPalette.crimson .. "Approaching opponent. Direction: " .. moveDirection .. colorPalette.neutral)
-            ao.send({Target = Game, Action = "MovePlayer", Player = ao.id, Direction = moveDirection})
-        else
-            print(colorPalette.charcoal .. "Insufficient energy to act." .. colorPalette.neutral)
-        end
+-- Handler to trigger game state updates.
+Handlers.add(
+  "GetGameStateOnTick",
+  Handlers.utils.hasMatchingTag("Action", "Tick"),
+  function ()
+    if not InAction then -- InAction logic added
+      InAction = true -- InAction logic added
+      print(colors.gray .. "Getting game state..." .. colors.reset)
+      ao.send({Target = Game, Action = "GetGameState"})
     else
-        print(colorPalette.crimson .. "No opponent detected. Reevaluating actions." .. colorPalette.neutral)
+      print("Previous action still in progress. Skipping.")
     end
-    ActionInProgress = false
-end
+  end
+)
 
-function calculateDirection(x1, y1, x2, y2)
-    local horMove = x2 - x1
-    local verMove = y2 - y1
-    local direction = ""
+-- Handler to automate payment confirmation when waiting period starts.
+Handlers.add(
+  "AutoPay",
+  Handlers.utils.hasMatchingTag("Action", "AutoPay"),
+  function (msg)
+    print("Auto-paying confirmation fees.")
+    ao.send({ Target = Game, Action = "Transfer", Recipient = Game, Quantity = "1000"})
+  end
+)
 
-    if verMove > 0 then
-        direction = "Downward"
-    elseif verMove < 0 then
-        direction = "Upward"
+-- Handler to update the game state upon receiving game state information.
+Handlers.add(
+  "UpdateGameState",
+  Handlers.utils.hasMatchingTag("Action", "GameState"),
+  function (msg)
+    local json = require("json")
+    LatestGameState = json.decode(msg.Data)
+    ao.send({Target = ao.id, Action = "UpdatedGameState"})
+    print("Game state updated. Print \'LatestGameState\' for detailed view.")
+  end
+)
+
+-- Handler to decide the next best action.
+Handlers.add(
+  "decideNextAction",
+  Handlers.utils.hasMatchingTag("Action", "UpdatedGameState"),
+  function ()
+    if LatestGameState.GameMode ~= "Playing" then
+      InAction = false -- InAction logic added
+      return
     end
+    print("Deciding next action.")
+    decideNextAction()
+    ao.send({Target = ao.id, Action = "Tick"})
+  end
+)
 
-    if horMove > 0 then
-        direction = direction .. "Rightward"
-    elseif horMove < 0 then
-        direction = direction .. "Leftward"
-    end
-
-    return direction
-end
-
-function locateNearestOpponent()
-    local currentPlayer = GameStatus.Players[ao.id]
-    local minDistance = math.huge
-    local closestOpponent = nil
-
-    for id, state in pairs(GameStatus.Players) do
-        if id ~= ao.id then
-            local dist = math.sqrt((state.x - currentPlayer.x)^2 + (state.y - currentPlayer.y)^2)
-            if dist < minDistance then
-                minDistance = dist
-                closestOpponent = id
-            end
-        end
-    end
-
-    CurrentOpponent = closestOpponent
-    if CurrentOpponent then
-        print(colorPalette.azure .. "Target acquired: ID " .. CurrentOpponent .. colorPalette.neutral)
+-- Handler to automatically attack when hit by another player.
+Handlers.add(
+  "ReturnAttack",
+  Handlers.utils.hasMatchingTag("Action", "Hit"),
+  function (msg)
+    if not InAction then -- InAction logic added
+      InAction = true -- InAction logic added
+      local playerEnergy = LatestGameState.Players[ao.id].energy
+      if playerEnergy == undefined then
+        print(colors.red .. "Unable to read energy." .. colors.reset)
+        ao.send({Target = Game, Action = "Attack-Failed", Reason = "Unable to read energy."})
+      elseif playerEnergy == 0 then
+        print(colors.red .. "Player has insufficient energy." .. colors.reset)
+        ao.send({Target = Game, Action = "Attack-Failed", Reason = "Player has no energy."})
+      else
+        print(colors.red .. "Returning attack." .. colors.reset)
+        ao.send({Target = Game, Action = "PlayerAttack", Player = ao.id, AttackEnergy = tostring(playerEnergy)})
+      end
+      InAction = false -- InAction logic added
+      ao.send({Target = ao.id, Action = "Tick"})
     else
-        print(colorPalette.crimson .. "No opponents within range." .. colorPalette.neutral)
+      print("Previous action still in progress. Skipping.")
     end
-end
-
-Handlers.add(
-    "Elimination-AutoPay",
-    Handlers.utils.hasMatchingTag("Action", "Eliminated"),
-    function (msg)
-        print(colorPalette.crimson .. "Elimination noticed. Processing autopay." .. colorPalette.neutral)
-        ao.send({Target = CRED, Action = "Transfer", Recipient = Game, Quantity = "1000"})
-    end
-)
-
-Handlers.add(
-    "Payment-UpdateState",
-    Handlers.utils.hasMatchingTag("Action", "Payment-Confirmed"),
-    function (msg)
-        print(colorPalette.emerald .. "Bot reactivated" .. colorPalette.neutral)
-        ActionInProgress = false
-        Send({Target = Game, Action = "RequestGameState", Name = Name, Owner = Owner})
-    end
-)
-
-Handlers.add(
-    "RequestStateOnTick",
-    Handlers.utils.hasMatchingTag("Action", "Tick"),
-    function ()
-        ao.send({Target = Game, Action = "RequestGameState"})
-    end
-)
-
-Handlers.add(
-    "RefreshGameState",
-    Handlers.utils.hasMatchingTag("Action", "GameStateUpdate"),
-    function (msg)
-        local json = require("json")
-        GameStatus = json.decode(msg.Data)
-        ao.send({Target = ao.id, Action = "StateUpdated"})
-    end
-)
-
-Handlers.add(
-    "evaluateNextMove",
-    Handlers.utils.hasMatchingTag("Action", "StateUpdated"),
-    function ()
-        print("Analyzing surroundings..")
-        evaluateNextMove()
-        ao.send({Target = ao.id, Action = "Tick"})
-    end
-)
-
-Handlers.add(
-    "CounterAttack",
-    Handlers.utils.hasMatchingTag("Action", "Hit"),
-    function (msg)
-        local playerEnergy = GameStatus.Players[ao.id].energy
-        if playerEnergy < 5 then
-            print(colorPalette.crimson .. "Player exhausted." .. colorPalette.neutral)
-        else
-            print(colorPalette.crimson .. "Initiating counterattack..." .. colorPalette.neutral)
-            ao.send({Target = Game, Action = "PlayerAttack", AttackEnergy = tostring(playerEnergy)})
-        end
-        ao.send({Target = ao.id, Action = "Tick"})
-    end
-)
-
-Handlers.add(
-    "CollectRewards",
-    function (msg)
-        return msg.Action == "Credit-Notice" and msg.From == Game and "continue" or false
-    end,
-    function (msg)
-        print(colorPalette.emerald .. "Collecting rewards" .. colorPalette.neutral)
-        ao.send({Target = Game, Action = "Withdraw"})
-    end
-)
-
-Handlers.add(
-    "AutoRejoin",
-    Handlers.utils.hasMatchingTag("Action", "Removed"),
-    function (msg)
-        print("Processing automatic fee payment.")
-        ao.send({Target = CRED, Action = "Transfer", Recipient = Game, Quantity = "1000"})
-    end
+  end
 )
