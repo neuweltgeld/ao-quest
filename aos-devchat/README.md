@@ -43,11 +43,16 @@ channelId=your_channel_id
 processId=your_process_id
 DISCORD_TOKEN=your_discord_token
 ```
+```console
+# npm start
+npm run start
 
-```
+# aos message commands
+
 Send({ Target = ao.id, Action = "Register" })
 
 Send({Target = ao.id, Action = "Broadcast", Data = "Aos chat message from AOS" })
+
 ```
 
 
