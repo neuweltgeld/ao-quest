@@ -1,5 +1,8 @@
 # AOS-DEVCHAT
 
+For testing purpose, please use discord chat invite
+https://discord.gg/JAZMNrnu
+
 This project is a Discord bot that interacts with a backend API and uses worker threads to handle background tasks. The bot is configured using environment variables and includes several modules for different functionalities.
 
 ## Project Structure
